@@ -31,10 +31,10 @@ type (
 	}
 
 	NewRelicEmitter struct {
-		client      *http.Client
-		url         string
-		apikey      string
-		prefix      string
+		//client      *http.Client
+		//url         string
+		//apikey      string
+		//prefix      string
 		containers  *stats
 		volumes     *stats
 		compression bool
@@ -59,6 +59,10 @@ type (
 	}
 
 	batchBuffer struct {
+		client      *http.Client
+		url         string
+		apikey      string
+		prefix      string
 		payloadQueue   batchPayload
 		lastUpdateTime time.Time
 		compressed     bool
@@ -148,7 +152,7 @@ func (emitter *NewRelicEmitter) emitBatch(logger lager.Logger, payload batchPayl
 	)
 
 	payload = append(append([]byte{'['}, payload...), ']')
-
+	fmt.Println("json payload: ", string(payload))
 	if emitter.compression {
 		payloadReader, err = gZipBuffer(payload)
 		if err != nil {
@@ -177,24 +181,26 @@ func (emitter *NewRelicEmitter) emitBatch(logger lager.Logger, payload batchPayl
 			errors.Wrap(metric.ErrFailedToEmit, err.Error()))
 		return
 	}
-	
+
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		logger.Error("non-200-response-code",
+			errors.Wrap(metric.ErrFailedToEmit, resp.Status))
+	}
 	resp.Body.Close()
 	emitter.batchBuffer.updateLastTime()
 }
 
 func (emitter *NewRelicEmitter) Emit(logger lager.Logger, event metric.Event) {
-	payload := emitter.payload(logger, event)
+	payload := emitter.enqueuePayloads(logger, event)
 
 	batchPayload := emitter.batchBuffer.enqueue(logger, payload)
-	// check the buffer size (should less then 1 MB)
 	if batchPayload != nil {
 		//emit the batch payload now
 		emitter.emitBatch(logger, batchPayload)
 	}
 }
 
-func (emitter *NewRelicEmitter) payload(logger lager.Logger, event metric.Event) fullPayload {
-	payload := make(fullPayload, 0)
+func (emitter *NewRelicEmitter) enqueuePayloads(logger lager.Logger, event metric.Event)  {
 
 	switch event.Name {
 
@@ -206,7 +212,7 @@ func (emitter *NewRelicEmitter) payload(logger lager.Logger, event metric.Event)
 		"http response time",
 		"database queries",
 		"database connections":
-		payload = append(payload, emitter.simplePayload(logger, event, ""))
+		emitter.batchBuffer.enqueue(logger, emitter.simplePayload(logger, event, ""))
 
 	// These are periodic metrics that are consolidated and only emitted once
 	// per cycle (the emit trigger is chosen because it's currently last in the
@@ -223,7 +229,7 @@ func (emitter *NewRelicEmitter) payload(logger lager.Logger, event metric.Event)
 		newPayload["created"] = emitter.containers.created
 		newPayload["deleted"] = emitter.containers.deleted
 		delete(newPayload, "value")
-		payload = append(payload, newPayload)
+		emitter.batchBuffer.enqueue(logger, newPayload)
 
 	case "volumes deleted":
 		emitter.volumes.deleted = event.Value
@@ -235,15 +241,16 @@ func (emitter *NewRelicEmitter) payload(logger lager.Logger, event metric.Event)
 		newPayload["created"] = emitter.volumes.created
 		newPayload["deleted"] = emitter.volumes.deleted
 		delete(newPayload, "value")
-		payload = append(payload, newPayload)
+		emitter.batchBuffer.enqueue(logger, newPayload)
 
 	// And a couple that need a small rename (new relic doesn't like some chars)
 	case "scheduling: full duration (ms)":
-		payload = append(payload, emitter.simplePayload(logger, event, "scheduling_full_duration_ms"))
+		emitter.batchBuffer.enqueue(logger, emitter.simplePayload(logger, event, "scheduling_full_duration_ms"))
 	case "scheduling: loading versions duration (ms)":
-		payload = append(payload, emitter.simplePayload(logger, event, "scheduling_load_duration_ms"))
+		emitter.batchBuffer.enqueue(logger, emitter.simplePayload(logger, event, "scheduling_load_duration_ms"))
 	case "scheduling: job duration (ms)":
-		payload = append(payload, emitter.simplePayload(logger, event, "scheduling_job_duration_ms"))
+		emitter.batchBuffer.enqueue(logger, emitter.simplePayload(logger, event, "scheduling_job_duration_ms"))
+
 	default:
 		// Ignore the rest
 	}
@@ -258,9 +265,9 @@ func (emitter *NewRelicEmitter) payload(logger lager.Logger, event metric.Event)
 		// didn't; therefore, be consistently inconsistent and use the
 		// concourse metric names, not our translation layer.
 		singlePayload["metric"] = event.Name
-		payload = append(payload, singlePayload)
+		emitter.batchBuffer.enqueue(logger, singlePayload)
+
 	}
-	return payload
 }
 
 func (emitter *NewRelicEmitter) Flush(logger lager.Logger) {
@@ -272,9 +279,9 @@ func (emitter *NewRelicEmitter) Flush(logger lager.Logger) {
 	}
 }
 
-func (db *batchBuffer) enqueue(logger lager.Logger, payload fullPayload) batchPayload {
+func (db *batchBuffer) enqueue(logger lager.Logger, payload singlePayload) batchPayload {
 	// enqueue the current payload.
-	// if it exceeds the max limit(1Mb), return the existed payload, and enqueue the current payload
+	// if it exceeds the max limit(1Mb), return everything that's enqueued. Otherwise return nil
 	// lock and unlock should be applied.
 	newPayloadData, err := json.Marshal(payload)
 	if err != nil {
@@ -286,6 +293,15 @@ func (db *batchBuffer) enqueue(logger lager.Logger, payload fullPayload) batchPa
 		tempBuff []byte
 		buff     batchPayload
 	)
+	//newPayloadSize := len(newPayloadData)
+	//if newPayloadSize > 0 && newPayloadData[0] == '[' && newPayloadData[newPayloadSize-1] == ']' {
+	//	//strip the '[' and ']', flatten the events
+	//	newPayloadData = newPayloadData[1:newPayloadSize-1]
+	//}
+
+	if len(newPayloadData) <= 0 {
+		return nil
+	}
 
 	if len(db.payloadQueue) != 0 {
 		tempBuff = append(db.payloadQueue, ',')

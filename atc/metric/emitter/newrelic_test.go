@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-var _ = Describe("newrelic metric", func() {
+var _ = FDescribe("newrelic metric", func() {
 	OKResponse := `{"success":true,"uuid":"12345678-1234-5678-9012-123456789012"}`
 	var (
 		newrelicServer *ghttp.Server
@@ -52,16 +52,16 @@ var _ = Describe("newrelic metric", func() {
 	})
 	Context("when batch buffer is less than 1MB", func() {
 		It("enqueue to the batch buffer", func() {
-			emitter.Emit(logger, metric.Event{
-				Name:  "build started",
-				Value: "",
-				State: metric.EventStateOK,
-				Host:  "test-client-1",
-				Time:  time.Now(),
-			})
-
 			if newrelicEmitter, OK := emitter.(*NewRelicEmitter); OK {
-				Expect(newrelicEmitter.batchBuffer.payloadQueue).To(HaveLen(101))
+				Expect(newrelicEmitter.batchBuffer.payloadQueue).To(HaveLen(0))
+				emitter.Emit(logger, metric.Event{
+					Name:  "build started",
+					Value: "",
+					State: metric.EventStateOK,
+					Host:  "test-client-1",
+					Time:  time.Now(),
+				})
+				Expect(newrelicEmitter.batchBuffer.payloadQueue).To(HaveLen(99))
 			}
 		})
 	})
@@ -85,6 +85,7 @@ var _ = Describe("newrelic metric", func() {
 					Time:  time.Now(),
 				})
 			}
+			//check the output, expect not have "non-200"
 		})
 	})
 })
